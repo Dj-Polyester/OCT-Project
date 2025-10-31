@@ -6,8 +6,8 @@ from PIL import Image
 import random
 
 SOURCE_DIR = "CellData/OCT"
-TARGET_DIR_RESIZED = "OCT_resized"
-TARGET_DIR_UNDERSAMPLED = "OCT_undersampled"
+TARGET_DIR_RESIZED = "CellData_resized"
+TARGET_DIR_UNDERSAMPLED = "CellData_undersampled"
 
 def print_progress(count, total, end = ""):
 	_end = f" {end}" if isinstance(end, str) else ""
