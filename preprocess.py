@@ -2,10 +2,12 @@
 import os
 import shutil
 from pathlib import Path
-from PIL import Image
-import random
 from typing import Mapping, Union, Iterable
-from utils import SOURCE_DIR, TARGET_DIR_RESIZED, TARGET_DIR_PREPROCESSED
+import random
+from PIL import Image
+import torch
+from torchvision.io import read_image, ImageReadMode
+from utils import SOURCE_DIR, TARGET_DIR_RESIZED, TARGET_DIR_PREPROCESSED, CLASSES_TXT_FILE
 
 def print_progress(count, total, end = ""):
 	_end = f" {end}" if isinstance(end, str) else ""
@@ -146,6 +148,12 @@ def flatten_directory(directory):
 			directory.rmdir()
 	print('\n✓ Done!')
 
+def save_classes(directory):
+	dir_path = Path(directory)
+	parent_path = dir_path.parent
+	with open(parent_path / CLASSES_TXT_FILE, "w") as classes_f:
+		classes_f.writelines("\n".join([class_path.name for class_path in dir_path.iterdir()]))
+	
 def divide_into_subsets(directory, names: Iterable[str], ps: Iterable[float]):
 	dir_path = Path(directory)
 	parent_path = dir_path.parent
@@ -171,20 +179,77 @@ def divide_into_subsets(directory, names: Iterable[str], ps: Iterable[float]):
 		dir_path.rmdir()
 	print('\n✓ Done!')
 
+def combined_mean(x1,n1,x2,n2):
+	return (n1*x1 + n2*x2) / (n1+n2)
+
+def combined_var(v1,x1,n1,v2,x2,n2,x, c=1):
+	"""c is the correction term in the variance"""
+	return ((n1-c)*v1 + (n2-c)*v2 + n1*(x1-x)**2 + n2*(x2-x)**2) / (n1+n2-c)
+
+
+def get_normal_statistics_whole(directory, until = None):
+	dir_path = Path(directory)
+	total = len(list(dir_path.iterdir()))
+	all_instances = None
+	for instance_count, path in enumerate(dir_path.iterdir(),1):
+		if isinstance(until, int) and instance_count == until:
+			break
+		instance = read_image(path, mode=ImageReadMode.GRAY).type(torch.float32)
+		all_instances = instance if all_instances == None else torch.cat((all_instances, instance))
+		print_progress(instance_count, total)
+	return all_instances.mean(), all_instances.std()
+
+def get_normal_statistics(directory, until = None):
+	dir_path = Path(directory)
+	mean = 0
+	var = 0
+	numelems = 0
+	total = len(list(dir_path.iterdir()))
+	for instance_count, path in enumerate(dir_path.iterdir(),1):
+		if isinstance(until, int) and instance_count == until:
+			break
+		instance = read_image(path, mode=ImageReadMode.GRAY).type(torch.float32)
+		instance_numelems = instance.numel()
+		# Mean
+		instance_mean = instance.mean()
+		_combined_mean = combined_mean(
+			mean, numelems, 
+			instance_mean, instance_numelems
+		)
+		# var
+		instance_var = instance.var()
+		_combined_var = combined_var(
+			var, mean, numelems,
+			instance_var, instance_mean, instance_numelems,
+			_combined_mean,
+		)
+		numelems += instance_numelems
+		mean = _combined_mean
+		var = _combined_var
+		print_progress(instance_count, total)
+	return mean, var.sqrt()
+
 if __name__ == '__main__':
-	# print("Copying resized files")
+	# print("Copying resized files...")
 	# copy_folder_resize(SOURCE_DIR, TARGET_DIR_RESIZED)
-	# print("Checking for equality")
+	# print("Checking for equality...")
 	# check_equal(SOURCE_DIR, TARGET_DIR_RESIZED)
 	
-	print("Backing up resized files")
-	copy_folder(TARGET_DIR_RESIZED, TARGET_DIR_PREPROCESSED)
-	print("Checking for equality")
-	check_equal(TARGET_DIR_RESIZED, TARGET_DIR_PREPROCESSED)
-	print("Undersampling")
-	undersample(TARGET_DIR_PREPROCESSED / Path("train"))
-	print("Flattening")
-	flatten_directory(TARGET_DIR_PREPROCESSED / Path("train"))
-	flatten_directory(TARGET_DIR_PREPROCESSED / Path("test"))
-	print("Dividing")
-	divide_into_subsets(TARGET_DIR_PREPROCESSED / Path("train"), ["validation"], [.2])
+	# print("Backing up resized files...")
+	# copy_folder(TARGET_DIR_RESIZED, TARGET_DIR_PREPROCESSED)
+	# print("Checking for equality...")
+	# check_equal(TARGET_DIR_RESIZED, TARGET_DIR_PREPROCESSED)
+	train_dir = TARGET_DIR_PREPROCESSED / Path("train")
+	test_dir = TARGET_DIR_PREPROCESSED / Path("test")
+	# print(f"Saving classes to {str(TARGET_DIR_PREPROCESSED / Path(CLASSES_TXT_FILE))}...")
+	# save_classes(test_dir)
+	# print("Undersampling...")
+	# undersample(train_dir)
+	# print("Flattening...")
+	# flatten_directory(train_dir)
+	# flatten_directory(test_dir)
+	# print("Dividing...")
+	# divide_into_subsets(train_dir, ["validation"], [.2])
+	print("Obtaining normal statistics...")
+	mean, std = get_normal_statistics(train_dir)
+	print(mean, std)
