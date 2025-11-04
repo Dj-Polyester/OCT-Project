@@ -1,17 +1,32 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Mapping
 
 from matplotlib import pyplot as plt
 
 import torch
-from torch import nn, Tensor
-from torch import optim
+from torch import nn, Tensor, optim
+import torch.nn.functional as F
 from torch.utils.data import Dataset
-from torchvision.transforms import RandAugment
+from torchvision.transforms import RandAugment, v2
 from torchvision.io import read_image, ImageReadMode
 
 import lightning as L
+import torchmetrics.functional as MF
+
+# Config from paper
+CONFIG = {
+    # train data loader
+    "batch_size": 80,
+    # optimizer
+    "optimizer": ["Adam"],
+    "lr1": 1e-3, 
+    "lr2": 1e-4,
+    "betas": None,
+    # randaugment
+    "num_ops": None,
+    "magnitude": None,
+}
 
 SOURCE_DIR = "CellData/OCT"
 TARGET_DIR_RESIZED = "CellData_resized"
@@ -37,7 +52,21 @@ class OCTRandAugment(RandAugment):
 			#"AutoContrast": (torch.tensor(0.0), False),
 			#"Equalize": (torch.tensor(0.0), False),
 		}
-	
+
+TRANSFORMS = v2.Compose([
+    v2.ToDtype(torch.float32),
+    #v2.Normalize(mean=[49.4128, 49.4128, 49.4128], std=[57.3348, 57.3348, 57.3348]), #1000
+    v2.Normalize(mean=[49.0308, 49.0308, 49.0308], std=[55.3943, 55.3943, 55.3943]),
+    v2.ToDtype(torch.float32, scale=True),
+])
+
+TRAIN_TRANSFORMS = v2.Compose([
+   	TRANSFORMS,
+    # TODO: Hyperparameters of RandAugment
+    OCTRandAugment(),
+])
+
+
 class CustomDataset(Dataset):
 	@classmethod
 	def classes(cls):
@@ -122,12 +151,13 @@ class TransferLearning:
 		setattr(model, tlhead.label, nn.Linear(tlhead.input_size, num_classes))
 	
 	@classmethod
-	def set_grads(cls, model_name, fill = None):
+	def set_grads(cls, model_name, fill = None, verbose = False):
 		tlhead = TransferLearning.get_tlhead(model_name)
 		model: nn.Module = cls.models[model_name]
 		for name, param in model.named_parameters():
 			param.requires_grad = fill if isinstance(fill, bool) else name.startswith(tlhead.label)
-			print(name, param.grad, param.requires_grad)
+			if verbose:
+				print(name, param.grad, param.requires_grad)
 
 
 
@@ -142,23 +172,49 @@ def plotimg(img: Tensor, label: str):
 	plt.show()
 
 # LightningModule for Training
-class LitOCTTL(L.LightningModule):
+class LitSupervised(L.LightningModule):
+	TRAIN_LOSS = "Train Loss"
+	VALIDATION_LOSS = "Validation Loss"
+	TRAIN_ACC = "Train Accuracy"
+	VALIDATION_ACC = "Validation Accuracy"
 	def __init__(self, model):
 		super().__init__()
 		self.model = model
 
-	def training_step(self, batch, batch_idx):
-		# training_step defines the train loop.
-		# it is independent of forward
-		x, _ = batch
-		x = x.view(x.size(0), -1)
-		z = self.encoder(x)
-		x_hat = self.decoder(z)
-		loss = nn.functional.mse_loss(x_hat, x)
+	def get_metrics(self, batch, transforms, labels: Mapping[str, str]):
+		instance, target = batch
+		instance = transforms(instance)
+		preds: Tensor = self.model(instance)
+
 		# Logging to TensorBoard (if installed) by default
-		self.log("train_loss", loss)
-		return loss
+		values = {}
+		if "loss" in labels:
+			values[labels["loss"]] = F.cross_entropy(preds, target) 
+		if "accuracy" in labels:
+			values[labels["accuracy"]] = MF.accuracy(preds, target, task="multiclass", num_classes=preds.size(1))
+			
+		self.log_dict(
+			values, 
+			prog_bar=True,
+			on_step=False,
+			on_epoch=True,
+			reduce_fx="mean",
+		)
+		return {k: values[v] for k,v in labels.items()}
+
+	def training_step(self, batch, batch_idx):
+		return self.get_metrics(
+			batch, 
+			TRAIN_TRANSFORMS,
+			{"loss": LitSupervised.TRAIN_LOSS, "accuracy": LitSupervised.TRAIN_ACC},
+		)
+	def validation_step(self, batch, batch_idx):
+		return self.get_metrics(
+			batch, 
+			TRANSFORMS,
+			{"loss": LitSupervised.VALIDATION_LOSS, "accuracy": LitSupervised.VALIDATION_ACC},
+		)
 
 	def configure_optimizers(self):
-		optimizer = optim.Adam(self.parameters(), lr=1e-3)
+		optimizer = optim.Adam(self.parameters(), lr=CONFIG["lr1"])
 		return optimizer

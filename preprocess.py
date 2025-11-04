@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
-import os
+import time
 import shutil
 from pathlib import Path
 from typing import Mapping, Union, Iterable
 import random
 from PIL import Image
 import torch
+from torch import Tensor
 from torchvision.io import read_image, ImageReadMode
+from torchvision.transforms import v2
 from utils import SOURCE_DIR, TARGET_DIR_RESIZED, TARGET_DIR_PREPROCESSED, CLASSES_TXT_FILE
+
+class Timer:
+	def __init__(self):
+		self.start = time.perf_counter()
+	def print(self):
+		self.duration = time.perf_counter() - self.start
+		print(f'\n✓ Done in {self.duration} secs!')
 
 def print_progress(count, total, end = ""):
 	_end = f" {end}" if isinstance(end, str) else ""
@@ -22,6 +31,7 @@ def copy_folder(src, dst):
 	total = sum(1 for _ in src_path.rglob('*') if not _.is_dir())
 	# Copy folder structure and process images
 	count = 0
+	timer = Timer()
 	for item in src_path.rglob('*'):
 		rel_path = item.relative_to(src_path)
 		dest_item = dst_path / rel_path
@@ -32,7 +42,7 @@ def copy_folder(src, dst):
 			dest_item.parent.mkdir(parents=True, exist_ok=True)
 			shutil.copy2(item, dest_item)
 			print_progress(count, total)
-	print('\n✓ Done!')
+	timer.print()
 
 def copy_folder_resize(src, dst, width=128, height=128):
 	src_path = Path(src)
@@ -42,6 +52,7 @@ def copy_folder_resize(src, dst, width=128, height=128):
 	total = sum(1 for _ in src_path.rglob('*') if _.suffix.lower() in img_exts)
 	# Copy folder structure and process images
 	img_count = 0
+	timer = Timer()
 	for item in src_path.rglob('*'):
 		rel_path = item.relative_to(src_path)
 		dest_item = dst_path / rel_path
@@ -62,8 +73,7 @@ def copy_folder_resize(src, dst, width=128, height=128):
 		else:
 			dest_item.parent.mkdir(parents=True, exist_ok=True)
 			shutil.copy2(item, dest_item)
-
-	print('\n✓ Done!')
+	timer.print()
 
 def check_equal(src, dst, width=128, height=128):
 	src_path = Path(src)
@@ -74,6 +84,7 @@ def check_equal(src, dst, width=128, height=128):
 	# Copy folder structure and process images
 	equal_count = 0
 	img_count = 0
+	timer = Timer()
 	for src_item, dst_item in zip(src_path.rglob('*'), dst_path.rglob('*')):
 		rel_src_path = src_item.relative_to(src_path)
 		rel_dst_path = dst_item.relative_to(dst_path)
@@ -83,7 +94,7 @@ def check_equal(src, dst, width=128, height=128):
 			if rel_src_path == rel_dst_path:
 				equal_count += 1
 			print_progress(img_count, total, end=f"({equal_count}/{total} equal)")
-	print('\n✓ Done!')
+	timer.print()
 
 class ClassPopulation(dict):
 	def __init__(self, mapping: Mapping[Path, int]):
@@ -119,6 +130,7 @@ def undersample(directory):
 	num_files2del_per_class, total = get_undersample_statistics(dir_path)
 	# Copy folder structure and process images
 	instance_count = 0
+	timer = Timer()
 	for class_path, num_files2del in num_files2del_per_class.items():
 		files2del = random.sample(list(class_path.iterdir()), k=num_files2del)
 		#print(num_files2del, files2del)
@@ -126,7 +138,7 @@ def undersample(directory):
 			instance_count += 1
 			file.unlink()
 			print_progress(instance_count, total)
-	print('\n✓ Done!')
+	timer.print()
 		
 def flatten_directory(directory):
 	dir_path = Path(directory)
@@ -134,6 +146,7 @@ def flatten_directory(directory):
 	_, total = get_statistics(dir_path)
 	# Copy folder structure and process images
 	instance_count = 0
+	timer = Timer()
 	for file in dir_path.rglob('*'):
 		if file.is_file():
 			dst = dir_path / file.name
@@ -146,7 +159,7 @@ def flatten_directory(directory):
 	for directory in sorted(dir_path.rglob('*'), reverse=True):
 		if directory.is_dir() and not list(directory.iterdir()):
 			directory.rmdir()
-	print('\n✓ Done!')
+	timer.print()
 
 def save_classes(directory):
 	dir_path = Path(directory)
@@ -164,6 +177,7 @@ def divide_into_subsets(directory, names: Iterable[str], ps: Iterable[float]):
 	instance_count = 0
 	instances = list(dir_path.iterdir())
 	total = len(instances)
+	timer = Timer()
 	for name, p in zip(names, ps):
 		ptotal = int(p*total)
 		files2mv = random.sample(instances, k=ptotal)
@@ -177,7 +191,7 @@ def divide_into_subsets(directory, names: Iterable[str], ps: Iterable[float]):
 					print_progress(instance_count, ptotal)
 	if dir_path.is_dir() and not list(dir_path.iterdir()):
 		dir_path.rmdir()
-	print('\n✓ Done!')
+	timer.print()
 
 def combined_mean(x1,n1,x2,n2):
 	return (n1*x1 + n2*x2) / (n1+n2)
@@ -187,37 +201,52 @@ def combined_var(v1,x1,n1,v2,x2,n2,x, c=1):
 	return ((n1-c)*v1 + (n2-c)*v2 + n1*(x1-x)**2 + n2*(x2-x)**2) / (n1+n2-c)
 
 
-def get_normal_statistics_whole(directory, until = None):
+def get_normal_statistics_whole(
+		directory, 
+		dim = (0,2,3),
+		mode = ImageReadMode.RGB,
+		until = None, 
+		transforms = v2.ToDtype(torch.float32),
+	):
 	dir_path = Path(directory)
 	total = len(list(dir_path.iterdir()))
 	all_instances = None
+	timer = Timer()
 	for instance_count, path in enumerate(dir_path.iterdir(),1):
 		if isinstance(until, int) and instance_count == until:
 			break
-		instance = read_image(path, mode=ImageReadMode.GRAY).type(torch.float32)
-		all_instances = instance if all_instances == None else torch.cat((all_instances, instance))
+		instance: Tensor = transforms(read_image(path, mode=mode))
+		all_instances = instance.unsqueeze(0) if all_instances == None else torch.cat((all_instances, instance.unsqueeze(0)))
 		print_progress(instance_count, total)
-	return all_instances.mean(), all_instances.std()
+	timer.print()
+	return all_instances.mean(dim=dim), all_instances.std(dim=dim)
 
-def get_normal_statistics(directory, until = None):
+def get_normal_statistics(
+		directory, 
+		dim = (1,2),
+		mode = ImageReadMode.RGB,
+		until = None, 
+		transforms = v2.ToDtype(torch.float32),
+	):
 	dir_path = Path(directory)
 	mean = 0
 	var = 0
 	numelems = 0
 	total = len(list(dir_path.iterdir()))
+	timer = Timer()
 	for instance_count, path in enumerate(dir_path.iterdir(),1):
 		if isinstance(until, int) and instance_count == until:
 			break
-		instance = read_image(path, mode=ImageReadMode.GRAY).type(torch.float32)
+		instance: Tensor = transforms(read_image(path, mode=mode))
 		instance_numelems = instance.numel()
 		# Mean
-		instance_mean = instance.mean()
+		instance_mean = instance.mean(dim=dim)
 		_combined_mean = combined_mean(
 			mean, numelems, 
 			instance_mean, instance_numelems
 		)
 		# var
-		instance_var = instance.var()
+		instance_var = instance.var(dim=dim)
 		_combined_var = combined_var(
 			var, mean, numelems,
 			instance_var, instance_mean, instance_numelems,
@@ -227,6 +256,7 @@ def get_normal_statistics(directory, until = None):
 		mean = _combined_mean
 		var = _combined_var
 		print_progress(instance_count, total)
+	timer.print()
 	return mean, var.sqrt()
 
 if __name__ == '__main__':
@@ -251,5 +281,14 @@ if __name__ == '__main__':
 	# print("Dividing...")
 	# divide_into_subsets(train_dir, ["validation"], [.2])
 	print("Obtaining normal statistics...")
-	mean, std = get_normal_statistics(train_dir)
+	transforms = v2.Compose([
+	    v2.ToDtype(torch.float32),
+	    #v2.Normalize(mean=[49.4128, 49.4128, 49.4128], std=[57.3348, 57.3348, 57.3348]), #1000
+	    v2.Normalize(mean=[49.0308, 49.0308, 49.0308], std=[55.3943, 55.3943, 55.3943]),
+	    v2.ToDtype(torch.float32, scale=True),
+	])
+	mean, std = get_normal_statistics(train_dir,transforms=transforms)
 	print(mean, std)
+	# Using concat, cpu and memory inefficient and slower
+	# mean, std = get_normal_statistics_whole(train_dir, transforms=transforms)
+	# print(mean, std)

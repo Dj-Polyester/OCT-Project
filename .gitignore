@@ -1,4 +1,5 @@
 CellData*
-test
+test/*
 .vscode
 .zed
+*logs
