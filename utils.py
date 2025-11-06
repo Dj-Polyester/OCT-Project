@@ -1,7 +1,7 @@
 import itertools
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, Dict, Mapping, Callable
+from typing import Tuple, Dict, Mapping, Callable, Optional
 
 from matplotlib import pyplot as plt
 
@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torchvision.transforms import RandAugment, v2
 from torchvision.io import read_image, ImageReadMode
+from torchvision.models import WeightsEnum
 
 import lightning as L
 import torchmetrics.functional as MF
@@ -101,12 +102,19 @@ class OCTMendeleyDataset(CustomImageDataset):
 		label = self.classes().index(label_str)
 		return instance, label
 
+@dataclass
+class TransferLearningHead:
+	label: str
+	input_size: int
+	
+@dataclass
+class TransferLearningModel:
+	model_callable: Callable
+	weights: Optional[WeightsEnum]
+	model: Optional[nn.Module] = None
+
 class TransferLearning:
-	@dataclass
-	class TransferLearningHead:
-		label: str
-		input_size: int
-		
+	models: dict[str, TransferLearningModel]
 	BASE_OUTPUT_SINGLE_LAYER: dict[str, TransferLearningHead] = {
 		"resnet18": TransferLearningHead("fc", 512), 
 		"resnet34": TransferLearningHead("fc", 512), 
@@ -142,13 +150,13 @@ class TransferLearning:
 	@classmethod
 	def replace_head(cls, model_name, num_classes):
 		tlhead = TransferLearning.get_tlhead(model_name)
-		model = cls.models[model_name]
+		model = cls.models[model_name].model
 		setattr(model, tlhead.label, nn.Linear(tlhead.input_size, num_classes))
 	
 	@classmethod
 	def set_grads(cls, model_name, fill = None, verbose = False):
 		tlhead = TransferLearning.get_tlhead(model_name)
-		model: nn.Module = cls.models[model_name]
+		model = cls.models[model_name].model
 		for name, param in model.named_parameters():
 			param.requires_grad = fill if isinstance(fill, bool) else name.startswith(tlhead.label)
 			if verbose:
@@ -199,14 +207,24 @@ class LitSupervised(L.LightningModule):
 	VALIDATION_LOSS = "Validation Loss"
 	TRAIN_ACC = "Train Accuracy"
 	VALIDATION_ACC = "Validation Accuracy"
-	def __init__(self, model, config, verbose=False):
+	def __init__(self, model_name, config, runname):
 		super().__init__()
-		self.model = model
-		self.reset_weights(verbose)
+
+		tlmodel = TransferLearning.models[model_name] 
+		tlmodel.model = tlmodel.model_callable(weights=tlmodel.weights)
+		self.model = tlmodel.model
+		# Replace head with a single layer MLP
+		TransferLearning.replace_head(model_name, len(OCTMendeleyDataset.classes()))
+		if runname == "step1":
+			# Step 1: Freeze weights
+			TransferLearning.set_grads(model_name)
+		elif runname == "step2":
+			# Step 2: Set weights
+			TransferLearning.set_grads(model_name, True)
 		self.config = config
 
 	def reset_weights(self, verbose=False):
-		for name, layer in TransferLearning.models["resnet152"].named_modules():
+		for name, layer in self.model.named_modules():
 			if verbose:
 				print(name, layer)
 			if hasattr(layer, 'reset_parameters'):
@@ -236,7 +254,6 @@ class LitSupervised(L.LightningModule):
 	def training_step(self, batch, batch_idx):
 		TRAIN_TRANSFORMS = v2.Compose([
 		   	TRANSFORMS,
-			# TODO: Hyperparameters of RandAugment
 			OCTRandAugment(
 				magnitude=self.config["magnitude"], 
 				num_magnitude_bins=MAGNITUDE_MAX_RANGE
