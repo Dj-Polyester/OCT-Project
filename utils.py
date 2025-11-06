@@ -1,6 +1,7 @@
+import itertools
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, Dict, Mapping
+from typing import Tuple, Dict, Mapping, Callable
 
 from matplotlib import pyplot as plt
 
@@ -15,23 +16,19 @@ import lightning as L
 import torchmetrics.functional as MF
 
 # Config from paper
-CONFIG = {
-    # train data loader
-    "batch_size": 80,
-    # optimizer
-    "optimizer": ["Adam"],
-    "lr1": 1e-3, 
-    "lr2": 1e-4,
-    "betas": None,
-    # randaugment
-    "num_ops": None,
-    "magnitude": None,
+GLOBAL_CONFIG = {
+	# train data loader
+	"batch_size": 80,
+	# optimizer
+	"optimizer": ["Adam"],
 }
 
+LOGDIR = "lightning_logs"
 SOURCE_DIR = "CellData/OCT"
 TARGET_DIR_RESIZED = "CellData_resized"
 TARGET_DIR_PREPROCESSED = "CellData_preprocessed"
 CLASSES_TXT_FILE = "classes.txt"
+MAGNITUDE_MAX_RANGE = 10
 
 class OCTRandAugment(RandAugment):
 	def _augmentation_space(self, num_bins: int, image_size: Tuple[int, int]) -> Dict[str, Tuple[Tensor, bool]]:
@@ -54,18 +51,11 @@ class OCTRandAugment(RandAugment):
 		}
 
 TRANSFORMS = v2.Compose([
-    v2.ToDtype(torch.float32),
-    #v2.Normalize(mean=[49.4128, 49.4128, 49.4128], std=[57.3348, 57.3348, 57.3348]), #1000
-    v2.Normalize(mean=[49.0308, 49.0308, 49.0308], std=[55.3943, 55.3943, 55.3943]),
-    v2.ToDtype(torch.float32, scale=True),
+	v2.ToDtype(torch.float32),
+	#v2.Normalize(mean=[49.4128, 49.4128, 49.4128], std=[57.3348, 57.3348, 57.3348]), #1000
+	v2.Normalize(mean=[49.0308, 49.0308, 49.0308], std=[55.3943, 55.3943, 55.3943]),
+	v2.ToDtype(torch.float32, scale=True),
 ])
-
-TRAIN_TRANSFORMS = v2.Compose([
-   	TRANSFORMS,
-    # TODO: Hyperparameters of RandAugment
-    OCTRandAugment(),
-])
-
 
 class CustomDataset(Dataset):
 	@classmethod
@@ -118,16 +108,21 @@ class TransferLearning:
 		input_size: int
 		
 	BASE_OUTPUT_SINGLE_LAYER: dict[str, TransferLearningHead] = {
-		"resnet": TransferLearningHead("fc", 2048),
-		"densenet": TransferLearningHead("classifier", 1664),
+		"resnet18": TransferLearningHead("fc", 512), 
+		"resnet34": TransferLearningHead("fc", 512), 
+		"resnet50": TransferLearningHead("fc", 2048),
+		"resnet152": TransferLearningHead("fc", 2048),
+		
+		"densenet121": TransferLearningHead("classifier", 1024), 
+		"densenet161": TransferLearningHead("classifier", 2208), 
+		"densenet169": TransferLearningHead("classifier", 1664),
+		"densenet201": TransferLearningHead("classifier", 1920),
 	}
 
 	@staticmethod
 	def model_index(model_name):
-		if model_name[:6] in TransferLearning.BASE_OUTPUT_SINGLE_LAYER:
-			return model_name[:6]
-		elif model_name[:8] in TransferLearning.BASE_OUTPUT_SINGLE_LAYER:
-			return model_name[:8]
+		if model_name in TransferLearning.BASE_OUTPUT_SINGLE_LAYER:
+			return model_name
 		raise ValueError(f"Invalid model name {model_name}")
 	
 	@classmethod
@@ -171,15 +166,51 @@ def plotimg(img: Tensor, label: str):
 	plt.title(label)
 	plt.show()
 
+def product_dict(
+	valid_mapping: Mapping,
+	condition: Callable = lambda **_: True,
+
+):
+	"""
+	Given a `valid_mapping` of key value pairs as (name, iterable_of_valid_values),
+	generates a mapping that satisfies `condition` for each iteration as
+	(name, possible_value) using cartesian product.
+
+	Usage:
+```
+for combination in product_dict(valid_mapping, condition):
+	# Do sth with the combination
+	...
+```
+	"""
+	keys = valid_mapping.keys()
+	iter_of_valid_vals = valid_mapping.values()
+	for val_comb in itertools.product(*iter_of_valid_vals):
+		comb = dict(zip(keys, val_comb))
+		if condition(**comb):
+			yield comb
+
+def stringify_map(_map: Mapping, delim="_"):
+	return delim.join([f"{k}:{v}" for k, v in _map.items()])
+
 # LightningModule for Training
 class LitSupervised(L.LightningModule):
 	TRAIN_LOSS = "Train Loss"
 	VALIDATION_LOSS = "Validation Loss"
 	TRAIN_ACC = "Train Accuracy"
 	VALIDATION_ACC = "Validation Accuracy"
-	def __init__(self, model):
+	def __init__(self, model, config, verbose=False):
 		super().__init__()
 		self.model = model
+		self.reset_weights(verbose)
+		self.config = config
+
+	def reset_weights(self, verbose=False):
+		for name, layer in TransferLearning.models["resnet152"].named_modules():
+			if verbose:
+				print(name, layer)
+			if hasattr(layer, 'reset_parameters'):
+				layer.reset_parameters()
 
 	def get_metrics(self, batch, transforms, labels: Mapping[str, str]):
 		instance, target = batch
@@ -203,6 +234,14 @@ class LitSupervised(L.LightningModule):
 		return {k: values[v] for k,v in labels.items()}
 
 	def training_step(self, batch, batch_idx):
+		TRAIN_TRANSFORMS = v2.Compose([
+		   	TRANSFORMS,
+			# TODO: Hyperparameters of RandAugment
+			OCTRandAugment(
+				magnitude=self.config["magnitude"], 
+				num_magnitude_bins=MAGNITUDE_MAX_RANGE
+			),
+		])
 		return self.get_metrics(
 			batch, 
 			TRAIN_TRANSFORMS,
@@ -216,5 +255,5 @@ class LitSupervised(L.LightningModule):
 		)
 
 	def configure_optimizers(self):
-		optimizer = optim.Adam(self.parameters(), lr=CONFIG["lr1"])
+		optimizer = optim.Adam(self.parameters(), lr=self.config["lr"])
 		return optimizer

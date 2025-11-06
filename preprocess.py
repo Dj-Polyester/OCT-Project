@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import time
+from collections import defaultdict
 import shutil
 from pathlib import Path
 from typing import Mapping, Union, Iterable
@@ -200,7 +201,6 @@ def combined_var(v1,x1,n1,v2,x2,n2,x, c=1):
 	"""c is the correction term in the variance"""
 	return ((n1-c)*v1 + (n2-c)*v2 + n1*(x1-x)**2 + n2*(x2-x)**2) / (n1+n2-c)
 
-
 def get_normal_statistics_whole(
 		directory, 
 		dim = (0,2,3),
@@ -259,6 +259,28 @@ def get_normal_statistics(
 	timer.print()
 	return mean, var.sqrt()
 
+def get_class_index(literal: str, classes):
+	for c in classes:
+		if literal.startswith(c):
+			return c
+	return None
+
+def get_class_dist_flattened(dir_path: Path):
+	classes = None
+	parent_path = dir_path.parent
+	with open(parent_path / CLASSES_TXT_FILE, "r") as fclasses:
+		classes = [c.rstrip("\n") for c in fclasses.readlines()]
+	classdict = {c:0 for c in classes}
+	total = len(list(dir_path.iterdir()))
+	timer = Timer()
+	for count, path in enumerate(dir_path.iterdir(), 1):
+		class_index = get_class_index(path.name, classes)
+		if class_index != None:
+			classdict[class_index] += 1
+		print_progress(count, total)
+	timer.print()
+	return classdict
+
 if __name__ == '__main__':
 	# print("Copying resized files...")
 	# copy_folder_resize(SOURCE_DIR, TARGET_DIR_RESIZED)
@@ -270,6 +292,7 @@ if __name__ == '__main__':
 	# print("Checking for equality...")
 	# check_equal(TARGET_DIR_RESIZED, TARGET_DIR_PREPROCESSED)
 	train_dir = TARGET_DIR_PREPROCESSED / Path("train")
+	validation_dir = TARGET_DIR_PREPROCESSED / Path("validation")
 	test_dir = TARGET_DIR_PREPROCESSED / Path("test")
 	# print(f"Saving classes to {str(TARGET_DIR_PREPROCESSED / Path(CLASSES_TXT_FILE))}...")
 	# save_classes(test_dir)
@@ -280,15 +303,19 @@ if __name__ == '__main__':
 	# flatten_directory(test_dir)
 	# print("Dividing...")
 	# divide_into_subsets(train_dir, ["validation"], [.2])
-	print("Obtaining normal statistics...")
-	transforms = v2.Compose([
-	    v2.ToDtype(torch.float32),
-	    #v2.Normalize(mean=[49.4128, 49.4128, 49.4128], std=[57.3348, 57.3348, 57.3348]), #1000
-	    v2.Normalize(mean=[49.0308, 49.0308, 49.0308], std=[55.3943, 55.3943, 55.3943]),
-	    v2.ToDtype(torch.float32, scale=True),
-	])
-	mean, std = get_normal_statistics(train_dir,transforms=transforms)
-	print(mean, std)
+	#print("Obtaining normal statistics...")
+	#transforms = v2.Compose([
+	#    v2.ToDtype(torch.float32),
+	#    #v2.Normalize(mean=[49.4128, 49.4128, 49.4128], std=[57.3348, 57.3348, 57.3348]), #1000
+	#    v2.Normalize(mean=[49.0308, 49.0308, 49.0308], std=[55.3943, 55.3943, 55.3943]),
+	#    v2.ToDtype(torch.float32, scale=True),
+	#])
+	#mean, std = get_normal_statistics(train_dir,transforms=transforms)
+	#print(mean, std)
 	# Using concat, cpu and memory inefficient and slower
 	# mean, std = get_normal_statistics_whole(train_dir, transforms=transforms)
 	# print(mean, std)
+	print("Training set distributions:")
+	print(get_class_dist_flattened(train_dir))
+	print("Validation set distributions:")
+	print(get_class_dist_flattened(validation_dir))
