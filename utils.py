@@ -111,7 +111,12 @@ class TransferLearningHead:
 class TransferLearningModel:
 	model_callable: Callable
 	weights: Optional[WeightsEnum]
-	model: Optional[nn.Module] = None
+	_model: Optional[nn.Module] = None
+	@property
+	def model(self):
+		if self._model == None:
+			self._model = self.model_callable(weights=self.weights)
+		return self._model
 
 class TransferLearning:
 	models: dict[str, TransferLearningModel]
@@ -119,6 +124,7 @@ class TransferLearning:
 		"resnet18": TransferLearningHead("fc", 512), 
 		"resnet34": TransferLearningHead("fc", 512), 
 		"resnet50": TransferLearningHead("fc", 2048),
+		"resnet101": TransferLearningHead("fc", 2048),
 		"resnet152": TransferLearningHead("fc", 2048),
 		
 		"densenet121": TransferLearningHead("classifier", 1024), 
@@ -207,23 +213,26 @@ class LitSupervised(L.LightningModule):
 	VALIDATION_LOSS = "Validation Loss"
 	TRAIN_ACC = "Train Accuracy"
 	VALIDATION_ACC = "Validation Accuracy"
-	def __init__(self, model_name, config, runname):
+	def __init__(self, config):
 		super().__init__()
+		runname = config["run"]
+		model_name = config["model"]
 
-		tlmodel = TransferLearning.models[model_name] 
-		tlmodel.model = tlmodel.model_callable(weights=tlmodel.weights)
+		tlmodel = TransferLearning.models[model_name]
 		self.model = tlmodel.model
 		# Replace head with a single layer MLP
 		TransferLearning.replace_head(model_name, len(OCTMendeleyDataset.classes()))
 		if runname == "step1":
+			print("Freezing weights")
 			# Step 1: Freeze weights
 			TransferLearning.set_grads(model_name)
 		elif runname == "step2":
-			# Step 2: Set weights
+			print("Unfreezing weights")
+			# Step 2: Unfreeze weights
 			TransferLearning.set_grads(model_name, True)
 		self.config = config
 
-	def reset_weights(self, verbose=False):
+	def reset_parameters(self, verbose=False):
 		for name, layer in self.model.named_modules():
 			if verbose:
 				print(name, layer)
