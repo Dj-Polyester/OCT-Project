@@ -25,9 +25,12 @@ GLOBAL_CONFIG = {
 }
 
 LOGDIR = "lightning_logs"
-SOURCE_DIR = "CellData/OCT"
-TARGET_DIR_RESIZED = "CellData_resized"
-TARGET_DIR_PREPROCESSED = "CellData_preprocessed"
+SOURCE_DIRS = [
+	"CellData/OCT",
+	"OCTData",
+]
+TARGET_DIR_RESIZED = "OCTData_resized"
+TARGET_DIR_PREPROCESSED = "OCTData_preprocessed"
 CLASSES_TXT_FILE = "classes.txt"
 MAGNITUDE_MAX_RANGE = 10
 
@@ -53,8 +56,9 @@ class OCTRandAugment(RandAugment):
 
 TRANSFORMS = v2.Compose([
 	v2.ToDtype(torch.float32),
-	#v2.Normalize(mean=[49.4128, 49.4128, 49.4128], std=[57.3348, 57.3348, 57.3348]), #1000
-	v2.Normalize(mean=[49.0308, 49.0308, 49.0308], std=[55.3943, 55.3943, 55.3943]),
+	#v2.Normalize(mean=[49.4128, 49.4128, 49.4128], std=[57.3348, 57.3348, 57.3348]), #Mendeley 1000
+	#v2.Normalize(mean=[49.0308, 49.0308, 49.0308], std=[55.3943, 55.3943, 55.3943]), #Mendeley
+	v2.Normalize(mean=[54.0711, 54.0711, 54.0711], std=[45.5358, 45.5358, 45.5357]), #obulisainaren
 	v2.ToDtype(torch.float32, scale=True),
 ])
 
@@ -96,9 +100,15 @@ class OCTMendeleyDataset(CustomImageDataset):
 	def __init__(self, _type):
 		super().__init__(TARGET_DIR_PREPROCESSED, _type, ImageReadMode.RGB)
 
+	def lbl2cls1(self, path: Path):
+		return path.name.split("-")[0]
+
+	def lbl2cls2(self, path: Path):
+		return path.name.split("_")[0].upper()
+
 	def __getitem__(self, index: int):
 		path, instance = self.path_instance_pair(index)
-		label_str = path.name.split("-")[0]
+		label_str = self.lbl2cls2(path)
 		label = self.classes().index(label_str)
 		return instance, label
 

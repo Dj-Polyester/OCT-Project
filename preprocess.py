@@ -10,7 +10,8 @@ import torch
 from torch import Tensor
 from torchvision.io import read_image, ImageReadMode
 from torchvision.transforms import v2
-from utils import SOURCE_DIR, TARGET_DIR_RESIZED, TARGET_DIR_PREPROCESSED, CLASSES_TXT_FILE
+import kagglehub
+from utils import SOURCE_DIRS, TARGET_DIR_RESIZED, TARGET_DIR_PREPROCESSED, CLASSES_TXT_FILE
 
 class Timer:
 	def __init__(self):
@@ -24,6 +25,12 @@ def print_progress(count, total, end = ""):
 	pct = (count / total * 100) if total else 0
 	bar = '█' * int(pct / 2) + '░' * (50 - int(pct / 2))
 	print(f'\r[{bar}] {pct:.1f}% ({count}/{total})', end=_end, flush=True)
+
+def download_dataset(dataset_name: str):
+	print(f"Downloading dataset {dataset_name} from Kaggle...")
+	path = kagglehub.dataset_download(dataset_name)
+	print("Path to dataset files:", path)
+	return path
 
 def copy_folder(src, dst):
 	src_path = Path(src)
@@ -287,35 +294,51 @@ if __name__ == '__main__':
 	# print("Checking for equality...")
 	# check_equal(SOURCE_DIR, TARGET_DIR_RESIZED)
 	
-	# print("Backing up resized files...")
-	# copy_folder(TARGET_DIR_RESIZED, TARGET_DIR_PREPROCESSED)
-	# print("Checking for equality...")
-	# check_equal(TARGET_DIR_RESIZED, TARGET_DIR_PREPROCESSED)
+	
 	train_dir = Path(TARGET_DIR_PREPROCESSED, "train")
-	validation_dir = Path(TARGET_DIR_PREPROCESSED, "validation")
+	validation_dir = Path(TARGET_DIR_PREPROCESSED, "val")
 	test_dir = Path(TARGET_DIR_PREPROCESSED, "test")
-	# print(f"Saving classes to {str(Path(TARGET_DIR_PREPROCESSED, CLASSES_TXT_FILE))}...")
-	# save_classes(test_dir)
+	path = download_dataset("obulisainaren/retinal-oct-c8")
+	ORIGINAL_DIR = Path(path, "RetinalOCT_Dataset" , "RetinalOCT_Dataset")
+	print("Copying dataset files...")
+	copy_folder(ORIGINAL_DIR, SOURCE_DIRS[1])
+	print("Checking for equality...")
+	check_equal(ORIGINAL_DIR, SOURCE_DIRS[1])
+
+	print("Copying resized files...")
+	copy_folder_resize(SOURCE_DIRS[1], TARGET_DIR_RESIZED)
+	print("Checking for equality...")
+	check_equal(SOURCE_DIRS[1], TARGET_DIR_RESIZED)
+
+	print("Backing up resized files...")
+	copy_folder(TARGET_DIR_RESIZED, TARGET_DIR_PREPROCESSED)
+	print("Checking for equality...")
+	check_equal(TARGET_DIR_RESIZED, TARGET_DIR_PREPROCESSED)
+
+	print(f"Saving classes to {str(Path(TARGET_DIR_PREPROCESSED, CLASSES_TXT_FILE))}...")
+	save_classes(test_dir)
 	# print("Undersampling...")
 	# undersample(train_dir)
-	# print("Flattening...")
-	# flatten_directory(train_dir)
-	# flatten_directory(test_dir)
+	print("Flattening...")
+	flatten_directory(train_dir)
+	flatten_directory(test_dir)
+	flatten_directory(validation_dir)
 	# print("Dividing...")
 	# divide_into_subsets(train_dir, ["validation"], [.2])
 	#print("Obtaining normal statistics...")
 	#transforms = v2.Compose([
 	#    v2.ToDtype(torch.float32),
-	#    #v2.Normalize(mean=[49.4128, 49.4128, 49.4128], std=[57.3348, 57.3348, 57.3348]), #1000
-	#    v2.Normalize(mean=[49.0308, 49.0308, 49.0308], std=[55.3943, 55.3943, 55.3943]),
+	#    #v2.Normalize(mean=[49.4128, 49.4128, 49.4128], std=[57.3348, 57.3348, 57.3348]), #Mendeley 1000
+	#	#v2.Normalize(mean=[49.0308, 49.0308, 49.0308], std=[55.3943, 55.3943, 55.3943]), #Mendeley
+	#	v2.Normalize(mean=[54.0711, 54.0711, 54.0711], std=[45.5358, 45.5358, 45.5357]), #obulisainaren
 	#    v2.ToDtype(torch.float32, scale=True),
 	#])
-	#mean, std = get_normal_statistics(train_dir,transforms=transforms)
-	#print(mean, std)
+	mean, std = get_normal_statistics(train_dir)
+	print(mean, std)
 	# Using concat, cpu and memory inefficient and slower
 	# mean, std = get_normal_statistics_whole(train_dir, transforms=transforms)
 	# print(mean, std)
-	print("Training set distributions:")
-	print(get_class_dist_flattened(train_dir))
-	print("Validation set distributions:")
-	print(get_class_dist_flattened(validation_dir))
+	# print("Training set distributions:")
+	# print(get_class_dist_flattened(train_dir))
+	# print("Validation set distributions:")
+	# print(get_class_dist_flattened(validation_dir))
