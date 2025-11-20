@@ -4,6 +4,9 @@ from pathlib import Path
 from typing import Tuple, Dict, Mapping, Callable, Optional
 
 from matplotlib import pyplot as plt
+import numpy as np
+import cv2 as cv
+
 
 import torch
 from torch import nn, Tensor, optim
@@ -25,12 +28,6 @@ GLOBAL_CONFIG = {
 }
 
 LOGDIR = "lightning_logs"
-SOURCE_DIRS = [
-	"CellData/OCT",
-	"OCTData",
-]
-TARGET_DIR_RESIZED = "OCTData_resized"
-TARGET_DIR_PREPROCESSED = "OCTData_preprocessed"
 CLASSES_TXT_FILE = "classes.txt"
 MAGNITUDE_MAX_RANGE = 10
 

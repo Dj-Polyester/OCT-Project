@@ -5,13 +5,16 @@ import shutil
 from pathlib import Path
 from typing import Mapping, Union, Iterable
 import random
-from PIL import Image
+
+import numpy as np
+import cv2 as cv
+
 import torch
 from torch import Tensor
 from torchvision.io import read_image, ImageReadMode
 from torchvision.transforms import v2
 import kagglehub
-from utils import SOURCE_DIRS, TARGET_DIR_RESIZED, TARGET_DIR_PREPROCESSED, CLASSES_TXT_FILE
+from utils import CLASSES_TXT_FILE
 
 class Timer:
 	def __init__(self):
@@ -52,7 +55,26 @@ def copy_folder(src, dst):
 			print_progress(count, total)
 	timer.print()
 
-def copy_folder_resize(src, dst, width=128, height=128):
+def cvreadimg(path: Path):
+	img = cv.imread(str(path))
+	assert img is not None, "file could not be read, check with os.path.exists()"
+	return img
+
+def mvimg2middle(path: Path):
+	img = cvreadimg(path)
+	cls = path.parent.name.split("_")[0]
+	gray = cv.cvtColor(img,cv.COLOR_BGR2GRAY)
+	gray_contrasted = cv.convertScaleAbs(gray, alpha=1.5, beta=0)
+	_, denoised = simple_segmentation(gray_contrasted, cls)
+	translated_img, _, _ = move2middle(img, denoised)
+	return translated_img
+
+def resize_image(path: Path, width=128, height=128):
+	img = cvreadimg(path)
+	resized_img = cv.resize(img, (width, height), interpolation=cv.INTER_LANCZOS4)
+	return resized_img
+
+def copy_folder_process(src, dst, callback, **kwargs):
 	src_path = Path(src)
 	dst_path = Path(dst)
 	# Get total image count
@@ -71,9 +93,8 @@ def copy_folder_resize(src, dst, width=128, height=128):
 			img_count += 1
 			dest_item.parent.mkdir(parents=True, exist_ok=True)
 			try:
-				img = Image.open(item)
-				resized_img = img.resize((width, height), Image.Resampling.LANCZOS)
-				resized_img.save(dest_item, quality=95)
+				processed_img = callback(item, **kwargs)
+				cv.imwrite(str(dest_item), processed_img, [int(cv.IMWRITE_JPEG_QUALITY), 95])
 			except Exception as e:
 				print(f"\nError processing {item}: {e} (falling back to plain copy)")
 				shutil.copy2(item, dest_item)
@@ -288,57 +309,129 @@ def get_class_dist_flattened(dir_path: Path):
 	timer.print()
 	return classdict
 
-if __name__ == '__main__':
-	# print("Copying resized files...")
-	# copy_folder_resize(SOURCE_DIR, TARGET_DIR_RESIZED)
-	# print("Checking for equality...")
-	# check_equal(SOURCE_DIR, TARGET_DIR_RESIZED)
+# MOVE TO MIDDLE
+
+def fill_corners(gray):
+	h, w = gray.shape
+	mask = np.zeros((h+2, w+2), dtype=np.uint8)
+	corners = [(0, 0), (0, h - 1), (w - 1, 0), (w - 1, h - 1)]
+	for corner_seed in corners:
+		# Low and high brightness tolerance (e.g., 5-unit tolerance in each channel)
+		lo_diff = (0, 0, 0)
+		up_diff = (0, 0, 0)
+
+		# Perform the flood fill
+		# The function modifies the 'img' array in-place
+		black_color = (0,0,0)
+		cv.floodFill(
+			gray, 
+			mask, 
+			corner_seed, 
+			black_color, 
+			loDiff=lo_diff, 
+			upDiff=up_diff
+		)
+	return gray
+
+def binary_cluster_calc_mean(img):
+	y, x = np.where(img == 255)
+	mean_coo = (int(np.mean(x)), int(np.mean(y)))
+
+	h, w = img.shape
+	middle_coo = (w/2, h/2)
+	return mean_coo, middle_coo
+
+def simple_segmentation(img, cls):
+	corner_filled = fill_corners(img)
+
+	# start segmentation
+	threshold_type = cv.THRESH_BINARY
+	if cls.lower() == "amd":
+		threshold_type += cv.THRESH_OTSU
+
+	_, thresh = cv.threshold(corner_filled,60,255,threshold_type)
+
+	denoised = cv.medianBlur(thresh, 23)
+
+	return thresh, denoised
+
+
+def move2middle(img, segment): 
+	mean_coo, middle_coo = binary_cluster_calc_mean(segment)
+	translation_vector = (int(middle_coo[0] - mean_coo[0]), int(middle_coo[1] - mean_coo[1]))
+
+	translation_matrix = np.float32([
+		[1, 0, translation_vector[0]],
+		[0, 1, translation_vector[1]]
+	])
+
+	h, w, _ = img.shape
+	white_color = (255, 255, 255)
+	translated_img = cv.warpAffine(
+		img, 
+		translation_matrix, 
+		(w, h),
+		borderMode=cv.BORDER_CONSTANT, # Tells OpenCV to use a constant color
+		borderValue=white_color          # Specifies the constant color (White)
+	)
+	return translated_img, mean_coo, middle_coo
+
+def preprocess(
+	src_dir, 
+	target_dir=None, 
+	preprocessed_suffix = "preprocessed",
+	resize_flag=False, 
+	undersample_flag=False,
+	mv2middle_flag = False,
+):
+
+	src_path = Path(src_dir).resolve()
+
+	if target_dir is None:
+		target_dir = src_dir
 	
-	
-	train_dir = Path(TARGET_DIR_PREPROCESSED, "train")
-	validation_dir = Path(TARGET_DIR_PREPROCESSED, "val")
-	test_dir = Path(TARGET_DIR_PREPROCESSED, "test")
-	path = download_dataset("obulisainaren/retinal-oct-c8")
-	ORIGINAL_DIR = Path(path, "RetinalOCT_Dataset" , "RetinalOCT_Dataset")
-	print("Copying dataset files...")
-	copy_folder(ORIGINAL_DIR, SOURCE_DIRS[1])
-	print("Checking for equality...")
-	check_equal(ORIGINAL_DIR, SOURCE_DIRS[1])
+	target_dir_resized = f'{target_dir}_resized' 
+	target_path_resized = Path(target_dir_resized).resolve() 
 
-	print("Copying resized files...")
-	copy_folder_resize(SOURCE_DIRS[1], TARGET_DIR_RESIZED)
-	print("Checking for equality...")
-	check_equal(SOURCE_DIRS[1], TARGET_DIR_RESIZED)
+	if resize_flag:
+		print("Copy-resizing...")
+		copy_folder_process(src_path, target_path_resized, resize_image)
+		print("Checking for equality...")
+		check_equal(src_path, target_path_resized)
 
-	print("Backing up resized files...")
-	copy_folder(TARGET_DIR_RESIZED, TARGET_DIR_PREPROCESSED)
-	print("Checking for equality...")
-	check_equal(TARGET_DIR_RESIZED, TARGET_DIR_PREPROCESSED)
+	target_dir_preprocessed = f'{target_dir}_{preprocessed_suffix}'
+	target_path_preprocessed = Path(target_dir_preprocessed).resolve() 
 
-	print(f"Saving classes to {str(Path(TARGET_DIR_PREPROCESSED, CLASSES_TXT_FILE))}...")
+	if mv2middle_flag:
+		print("Copy-moving to middle...")
+		copy_folder_process(
+			target_path_resized, 
+			target_path_preprocessed, 
+			mvimg2middle
+		)
+	else:
+		print("Backing up resized files...")
+		copy_folder(target_path_resized, target_path_preprocessed)
+	print("Checking for equality...")
+	check_equal(target_path_resized, target_path_preprocessed)
+
+	train_dir = Path(target_path_preprocessed, "train")
+	validation_dir = Path(target_path_preprocessed, "val")
+	test_dir = Path(target_path_preprocessed, "test")
+
+	if undersample_flag:
+		print("Undersampling...")
+		undersample(train_dir)
+
+	print(f"Saving classes to {str(Path(target_path_preprocessed, CLASSES_TXT_FILE))}...")
 	save_classes(test_dir)
-	# print("Undersampling...")
-	# undersample(train_dir)
+
 	print("Flattening...")
 	flatten_directory(train_dir)
-	flatten_directory(test_dir)
 	flatten_directory(validation_dir)
-	# print("Dividing...")
-	# divide_into_subsets(train_dir, ["validation"], [.2])
-	#print("Obtaining normal statistics...")
-	#transforms = v2.Compose([
-	#    v2.ToDtype(torch.float32),
-	#    #v2.Normalize(mean=[49.4128, 49.4128, 49.4128], std=[57.3348, 57.3348, 57.3348]), #Mendeley 1000
-	#	#v2.Normalize(mean=[49.0308, 49.0308, 49.0308], std=[55.3943, 55.3943, 55.3943]), #Mendeley
-	#	v2.Normalize(mean=[54.0711, 54.0711, 54.0711], std=[45.5358, 45.5358, 45.5357]), #obulisainaren
-	#    v2.ToDtype(torch.float32, scale=True),
-	#])
+	flatten_directory(test_dir)
+	
 	mean, std = get_normal_statistics(train_dir)
 	print(mean, std)
-	# Using concat, cpu and memory inefficient and slower
-	# mean, std = get_normal_statistics_whole(train_dir, transforms=transforms)
-	# print(mean, std)
-	# print("Training set distributions:")
-	# print(get_class_dist_flattened(train_dir))
-	# print("Validation set distributions:")
-	# print(get_class_dist_flattened(validation_dir))
+if __name__ == '__main__':
+	preprocess("OCTData", preprocessed_suffix="mv2middle", mv2middle_flag=True)
