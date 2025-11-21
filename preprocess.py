@@ -60,15 +60,6 @@ def cvreadimg(path: Path):
 	assert img is not None, "file could not be read, check with os.path.exists()"
 	return img
 
-def mvimg2middle(path: Path):
-	img = cvreadimg(path)
-	cls = path.parent.name.split("_")[0]
-	gray = cv.cvtColor(img,cv.COLOR_BGR2GRAY)
-	gray_contrasted = cv.convertScaleAbs(gray, alpha=1.5, beta=0)
-	_, denoised = simple_segmentation(gray_contrasted, cls)
-	translated_img, _, _ = move2middle(img, denoised)
-	return translated_img
-
 def resize_image(path: Path, width=128, height=128):
 	img = cvreadimg(path)
 	resized_img = cv.resize(img, (width, height), interpolation=cv.INTER_LANCZOS4)
@@ -346,12 +337,11 @@ def simple_segmentation(img, cls):
 
 	# start segmentation
 	threshold_type = cv.THRESH_BINARY
-	if cls.lower() == "amd":
-		threshold_type += cv.THRESH_OTSU
+	threshold_type += cv.THRESH_OTSU
 
 	_, thresh = cv.threshold(corner_filled,60,255,threshold_type)
 
-	denoised = cv.medianBlur(thresh, 23)
+	denoised = cv.medianBlur(thresh, 5)
 
 	return thresh, denoised
 
@@ -375,6 +365,17 @@ def move2middle(img, segment):
 		borderValue=white_color          # Specifies the constant color (White)
 	)
 	return translated_img, mean_coo, middle_coo
+
+def mvimg2middle(path: Path):
+	img = cvreadimg(path)
+	cls = path.parent.name.split("_")[0]
+	gray = cv.cvtColor(img,cv.COLOR_BGR2GRAY)
+
+	gray_contrasted = cv.convertScaleAbs(gray, alpha=1.5, beta=0)
+
+	thresh, denoised = simple_segmentation(gray_contrasted, cls)
+	translated_img, mean_coo, middle_coo = move2middle(img, denoised)
+	return translated_img
 
 def preprocess(
 	src_dir, 

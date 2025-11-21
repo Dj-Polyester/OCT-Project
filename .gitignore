@@ -3,5 +3,5 @@ OCTData*
 test/*
 .vscode
 .zed
-*logs
+*logs*
 __pycache__

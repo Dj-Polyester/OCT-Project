@@ -55,7 +55,8 @@ TRANSFORMS = v2.Compose([
 	v2.ToDtype(torch.float32),
 	#v2.Normalize(mean=[49.4128, 49.4128, 49.4128], std=[57.3348, 57.3348, 57.3348]), #Mendeley 1000
 	#v2.Normalize(mean=[49.0308, 49.0308, 49.0308], std=[55.3943, 55.3943, 55.3943]), #Mendeley
-	v2.Normalize(mean=[54.0711, 54.0711, 54.0711], std=[45.5358, 45.5358, 45.5357]), #obulisainaren
+	#v2.Normalize(mean=[54.0711, 54.0711, 54.0711], std=[45.5358, 45.5358, 45.5357]), #obulisainaren
+	v2.Normalize(mean=[82.0378, 82.0378, 82.0378], std=[79.9393, 79.9393, 79.9393]), #obulisainaren mv to middle
 	v2.ToDtype(torch.float32, scale=True),
 ])
 
@@ -94,8 +95,14 @@ class CustomImageDataset(CustomDataset):
 		return path, instance
 
 class OCTMendeleyDataset(CustomImageDataset):
-	def __init__(self, _type):
-		super().__init__(TARGET_DIR_PREPROCESSED, _type, ImageReadMode.RGB)
+	def __init__(
+			self, 
+			_type,
+			target_dir="OCTData", 
+			preprocessed_suffix = "preprocessed",
+		):
+		target_dir_preprocessed = f'{target_dir}_{preprocessed_suffix}'
+		super().__init__(target_dir_preprocessed, _type, ImageReadMode.RGB)
 
 	def lbl2cls1(self, path: Path):
 		return path.name.split("-")[0]
