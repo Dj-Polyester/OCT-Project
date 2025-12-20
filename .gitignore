@@ -5,3 +5,4 @@ test/*
 .zed
 *logs*
 __pycache__
+*.zip
