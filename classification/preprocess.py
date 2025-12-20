@@ -9,7 +9,8 @@ from utils import (
 	resize_image, 
 	copy_folder_process, 
 	check_equal, 
-	get_normal_statistics
+	get_normal_statistics,
+	IterableNormalStats,
 )
 
 from classification.utils import CLASSES_TXT_FILE
@@ -28,7 +29,7 @@ def get_class_dist(dir_path: Path):
 			for class_path in class_paths
 		}
 	)
-	print(f"Number of files in {dir_path.name} set per class:")
+	print(f"Number of files in {dir_path.name} set per class: {class_dist}")
 	return class_dist
 
 def get_statistics(dir_path: Path):
@@ -54,7 +55,7 @@ def undersample(directory):
 		for class_path, num_files2del in num_files2del_per_class.items():
 			files2del = random.sample(list(class_path.iterdir()), k=num_files2del)
 			#print(num_files2del, files2del)
-			for file in tqdm(files2del):
+			for file in files2del:
 				file.unlink()
 				pbar.update()
 		
@@ -116,7 +117,6 @@ def preprocess(
 	target_path_preprocessed = Path(target_dir_preprocessed).resolve() 
 
 	copy_folder(target_path_resized, target_path_preprocessed, "Backing up resized files...")
-
 	check_equal(target_path_resized, target_path_preprocessed)
 
 	train_dir = Path(target_path_preprocessed, "train")
@@ -132,7 +132,7 @@ def preprocess(
 	flatten_directory(validation_dir)
 	flatten_directory(test_dir)
 	
-	mean, std = get_normal_statistics(train_dir)
+	mean, std = get_normal_statistics(IterableNormalStats(train_dir))
 	print(mean, std)
 if __name__ == '__main__':
-	preprocess("classification/OCTData", undersample_flag=True)
+	preprocess("classification/OCTData")

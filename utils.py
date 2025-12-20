@@ -133,35 +133,45 @@ class CombinedNormalStats:
 		self.var = _combined_var
 	def get(self):
 		return self.mean, self.var.sqrt()
+
+class IterableNormalStats(Iterable):
+	def __init__(
+			self, 
+			directory: Path, 
+			mode = ImageReadMode.RGB,
+			until = None, 
+			transforms = v2.ToDtype(torch.float32),
+		):
+		self.dir_path = Path(directory)
+		self.mode = mode
+		self.until = until
+		self.transforms = transforms
+	def __iter__(self):
+		for instance_count, path in enumerate(self.dir_path.iterdir(),1):
+			if isinstance(self.until, int) and instance_count == self.until:
+				break
+			instance: Tensor = self.transforms(read_image(path, mode=self.mode))
+			yield instance
+	def __len__(self):
+		max_length = len(list(self.dir_path.iterdir()))
+		if isinstance(self.until, int):
+			return min(self.until, max_length)
+		return max_length
 	
 def get_normal_statistics_whole(
-		directory, 
+		iterable: Iterable,
 		dim = (0,2,3),
-		mode = ImageReadMode.RGB,
-		until = None, 
-		transforms = v2.ToDtype(torch.float32),
 	):
-	dir_path = Path(directory)
 	all_instances = None
-	for instance_count, path in tqdm(list(enumerate(dir_path.iterdir(),1)), desc="Calculating normal statistics..."):
-		if isinstance(until, int) and instance_count == until:
-			break
-		instance: Tensor = transforms(read_image(path, mode=mode))
+	for instance in tqdm(iterable, desc="Calculating normal statistics..."):
 		all_instances = instance.unsqueeze(0) if all_instances == None else torch.cat((all_instances, instance.unsqueeze(0)))
 	return all_instances.mean(dim=dim), all_instances.std(dim=dim)
 
 def get_normal_statistics(
-		directory, 
+		iterable: Iterable,
 		dim = (1,2),
-		mode = ImageReadMode.RGB,
-		until = None, 
-		transforms = v2.ToDtype(torch.float32),
 	):
-	dir_path = Path(directory)
 	combinedNormalStats = CombinedNormalStats()
-	for instance_count, path in tqdm(list(enumerate(dir_path.iterdir(),1)), desc="Calculating normal statistics..."):
-		if isinstance(until, int) and instance_count == until:
-			break
-		instance: Tensor = transforms(read_image(path, mode=mode))
+	for instance in tqdm(iterable, desc="Calculating normal statistics..."):
 		combinedNormalStats.update(instance, dim=dim)
 	return combinedNormalStats.get()
