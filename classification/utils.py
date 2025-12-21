@@ -1,7 +1,7 @@
 import itertools
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, Dict, Mapping, Callable, Optional
+from typing import Tuple, Dict, Mapping, Callable, Optional, Iterable
 
 from matplotlib import pyplot as plt
 import numpy as np
@@ -51,6 +51,29 @@ class OCTRandAugment(RandAugment):
 			#"Equalize": (torch.tensor(0.0), False),
 		}
 
+class IterableOCTData(Iterable):
+	def __init__(
+			self, 
+			directory: Path, 
+			mode = ImageReadMode.RGB,
+			until = None, 
+			transforms = v2.ToDtype(torch.float32),
+		):
+		self.dir_path = Path(directory)
+		self.mode = mode
+		self.until = until
+		self.transforms = transforms
+	def __iter__(self):
+		for instance_count, path in enumerate(self.dir_path.iterdir(),1):
+			if isinstance(self.until, int) and instance_count == self.until:
+				break
+			instance: Tensor = self.transforms(read_image(path, mode=self.mode))
+			yield instance
+	def __len__(self):
+		max_length = len(list(self.dir_path.iterdir()))
+		if isinstance(self.until, int):
+			return min(self.until, max_length)
+		return max_length
 
 class CustomDataset(Dataset):
 	@classmethod
@@ -222,10 +245,13 @@ class LitSupervised(L.LightningModule):
 
 	TRANSFORMS = v2.Compose([
 		v2.ToDtype(torch.float32),
-		#v2.Normalize(mean=[49.4128, 49.4128, 49.4128], std=[57.3348, 57.3348, 57.3348]), #Mendeley 1000
-		#v2.Normalize(mean=[49.0308, 49.0308, 49.0308], std=[55.3943, 55.3943, 55.3943]), #Mendeley
-		#v2.Normalize(mean=[54.0711, 54.0711, 54.0711], std=[45.5358, 45.5358, 45.5357]), #obulisainaren
-		v2.Normalize(mean=[82.0378, 82.0378, 82.0378], std=[79.9393, 79.9393, 79.9393]), #obulisainaren mv to middle
+		#v2.Normalize(mean=[49.4128, 49.4128, 49.4128], std=[57.3348, 57.3348, 57.3348]), #OCTDataMendeley 1000
+		#v2.Normalize(mean=[49.0308, 49.0308, 49.0308], std=[55.3943, 55.3943, 55.3943]), #OCTDataMendeley (Undersampled)
+		#v2.Normalize(mean=[54.0711, 54.0711, 54.0711], std=[45.5358, 45.5358, 45.5357]), #OCTData8C
+		#v2.Normalize(mean=[82.0378, 82.0378, 82.0378], std=[79.9393, 79.9393, 79.9393]), #obulisainaren mv to middle
+
+		#v2.Normalize(mean=[53.4781, 53.4781, 53.4781], std=[47.4589, 47.4589, 47.4589], #OCTData8C
+		#v2.Normalize(mean=[48.6115, 48.6115, 48.6115], std=[56.3848, 56.3848, 56.3848], #OCTDataMendeley
 		v2.ToDtype(torch.float32, scale=True),
 	])
 	def __init__(self, config):

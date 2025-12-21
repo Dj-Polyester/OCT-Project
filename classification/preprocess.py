@@ -10,10 +10,9 @@ from utils import (
 	copy_folder_process, 
 	check_equal, 
 	get_normal_statistics,
-	IterableNormalStats,
 )
 
-from classification.utils import CLASSES_TXT_FILE
+from classification.utils import CLASSES_TXT_FILE, IterableOCTData
 
 class ClassPopulation(dict):
 	def __init__(self, mapping: Mapping[Path, int]):
@@ -83,7 +82,7 @@ def flatten_directory(directory):
 def save_classes(directory):
 	dir_path = Path(directory)
 	parent_path = dir_path.parent
-	print(f"Saving classes to {str(Path(parent_path, CLASSES_TXT_FILE))}...")
+	print(f"Saving classes to {str(parent_path / CLASSES_TXT_FILE)}...")
 	with open(parent_path / CLASSES_TXT_FILE, "w") as classes_f:
 		classes_f.writelines("\n".join([class_path.name for class_path in dir_path.iterdir()]))
 
@@ -93,12 +92,38 @@ def get_class_index(literal: str, classes):
 			return c
 	return None
 
+def random_split(directory, names: Iterable[str], ps: Iterable[float]):
+	dir_path = Path(directory)
+	parent_path = dir_path.parent
+	# Copy folder structure and process images
+	instances = list(dir_path.iterdir())
+	total = len(instances)
+	with tqdm(
+		total=total,
+		desc="Splitting into subsets...",
+	) as pbar:
+		for name, p in zip(names, ps):
+			if name == directory.name:
+				continue
+			ptotal = int(p*total)
+			files2mv = random.sample(instances, k=ptotal)
+			for file in files2mv:
+				if file.is_file():
+					dst = parent_path / name / file.name
+					if file != dst:
+						dst.parent.mkdir(parents=True, exist_ok=True)
+						file.rename(dst)
+						pbar.update()
+	if dir_path.is_dir() and not list(dir_path.iterdir()):
+		dir_path.rmdir()
+
 def preprocess(
 	src_dir, 
 	target_dir=None, 
 	preprocessed_suffix = "preprocessed",
 	resize_flag=False, 
 	undersample_flag=False,
+	split_flag=False,
 ):
 
 	src_path = Path(src_dir).resolve()
@@ -120,19 +145,25 @@ def preprocess(
 	check_equal(target_path_resized, target_path_preprocessed)
 
 	train_dir = Path(target_path_preprocessed, "train")
-	validation_dir = Path(target_path_preprocessed, "val")
-	test_dir = Path(target_path_preprocessed, "test")
 
 	if undersample_flag:
 		undersample(train_dir)
-
-	save_classes(test_dir)
-
-	flatten_directory(train_dir)
-	flatten_directory(validation_dir)
-	flatten_directory(test_dir)
 	
-	mean, std = get_normal_statistics(IterableNormalStats(train_dir))
+	save_classes(train_dir)
+
+	for path in target_path_preprocessed.iterdir():
+		if path.is_dir():
+			flatten_directory(path)
+
+	if split_flag:
+		random_split(
+			train_dir, 
+			names = ["train", "val"], 
+			ps = [0.8, 0.2],
+		)
+
+	mean, std = get_normal_statistics(IterableOCTData(train_dir))
 	print(mean, std)
 if __name__ == '__main__':
-	preprocess("classification/OCTData")
+	preprocess("classification/OCTData8C")
+	preprocess("classification/OCTDataMendeley", split_flag=True)

@@ -133,30 +133,6 @@ class CombinedNormalStats:
 		self.var = _combined_var
 	def get(self):
 		return self.mean, self.var.sqrt()
-
-class IterableNormalStats(Iterable):
-	def __init__(
-			self, 
-			directory: Path, 
-			mode = ImageReadMode.RGB,
-			until = None, 
-			transforms = v2.ToDtype(torch.float32),
-		):
-		self.dir_path = Path(directory)
-		self.mode = mode
-		self.until = until
-		self.transforms = transforms
-	def __iter__(self):
-		for instance_count, path in enumerate(self.dir_path.iterdir(),1):
-			if isinstance(self.until, int) and instance_count == self.until:
-				break
-			instance: Tensor = self.transforms(read_image(path, mode=self.mode))
-			yield instance
-	def __len__(self):
-		max_length = len(list(self.dir_path.iterdir()))
-		if isinstance(self.until, int):
-			return min(self.until, max_length)
-		return max_length
 	
 def get_normal_statistics_whole(
 		iterable: Iterable,

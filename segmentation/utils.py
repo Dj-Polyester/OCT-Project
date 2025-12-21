@@ -8,11 +8,18 @@ import torch
 from torch.utils.data import Dataset
 
 from torchvision.io import read_image, ImageReadMode
+from torchvision.transforms import v2
+
+TRANSFORMS = v2.Compose([
+	v2.ToDtype(torch.float32),
+	v2.Normalize(mean=[35.3662, 35.3662, 35.3662], std=[45.0505, 45.0505, 45.0505]), #OCT5k
+	v2.ToDtype(torch.float32, scale=True),
+])
 
 class OCT5kDataset(Dataset):
 	def __init__(
 			self, 
-			root:str = "../OCT5k", 
+			root:str = "OCTData", 
 			images_root:str = "Images/Images_Original", 
 			labels_root:str = "Masks/Masks_Manual/Grading_1",
 		):
@@ -38,13 +45,14 @@ class OCT5kDataset(Dataset):
 
 		# Load as BGR (Standard)
 		img_bgr = cv.imread(image_path)
-
-		img_rgb = cv.cvtColor(img_bgr, cv.COLOR_BGR2GRAY)
-		image = torch.from_numpy(img_rgb).unsqueeze(0)
+		
+		# Convert to Grayscale
+		#img_rgb = cv.cvtColor(img_bgr, cv.COLOR_BGR2GRAY)
+		#image = torch.from_numpy(img_rgb).unsqueeze(0)
 
 		# Convert to RGB (Crucial for PyTorch/ML) and permute dimensions
-		#img_rgb = cv.cvtColor(img_bgr, cv.COLOR_BGR2RGB)
-		#image = torch.from_numpy(img_rgb).permute(2, 0, 1)
+		img_rgb = cv.cvtColor(img_bgr, cv.COLOR_BGR2RGB)
+		image = torch.from_numpy(img_rgb).permute(2, 0, 1)
 
 		label = read_image(str(label_path), mode=ImageReadMode.GRAY)
 		return image, label
@@ -63,3 +71,25 @@ class OCT5kDataset(Dataset):
 		cls.CLASSES = sorted(list(set(name.split(" Part")[0] for name in folder_names)))
 
 		return cls.CLASSES
+	
+class IterableOCT5kDataset(OCT5kDataset):
+	def __init__(
+			self, 
+			root:str = "OCTData", 
+			images_root:str = "Images/Images_Original", 
+			labels_root:str = "Masks/Masks_Manual/Grading_1",
+			transforms = v2.ToDtype(torch.float32),
+		):
+		super().__init__(root, images_root, labels_root)
+		self.current_index = 0
+		self.transforms = transforms
+
+	def __iter__(self):
+		return self
+	def __next__(self):
+		if self.current_index >= len(self):
+			raise StopIteration
+		
+		image, _ = self[self.current_index]
+		self.current_index += 1
+		return self.transforms(image)
