@@ -52,7 +52,7 @@ def resize_image(path: Path, width=128, height=128):
 def copy_folder_process(src, dst, desc, callback, **kwargs):
 	src_path = Path(src)
 	dst_path = Path(dst)
-	img_exts = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
+	img_exts = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff'}
 	# Copy folder structure and process images
 	with tqdm(
 		total=sum(1 for _ in src_path.rglob('*') if _.suffix.lower() in img_exts),
