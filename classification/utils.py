@@ -1,10 +1,12 @@
-import itertools
+import itertools, random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple, Dict, Mapping, Callable, Optional, Iterable
+from collections import defaultdict
 
 from matplotlib import pyplot as plt
 import numpy as np
+from numpy import ndarray
 import cv2 as cv
 from PIL import Image
 
@@ -18,6 +20,11 @@ from torchvision.models import WeightsEnum
 
 import lightning as L
 import torchmetrics.functional as MF
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd().parent))
+from core_utils import IMG_EXTS
 
 # Config from paper
 GLOBAL_CONFIG = {
@@ -50,87 +57,74 @@ class OCTRandAugment(RandAugment):
 			#"AutoContrast": (torch.tensor(0.0), False),
 			#"Equalize": (torch.tensor(0.0), False),
 		}
-
-class IterableOCTData(Iterable):
-	def __init__(
-			self, 
-			directory: Path, 
-			mode = ImageReadMode.RGB,
-			until = None, 
-			transforms = v2.ToDtype(torch.float32),
-		):
-		self.dir_path = Path(directory)
-		self.mode = mode
-		self.until = until
-		self.transforms = transforms
-	def __iter__(self):
-		for instance_count, path in enumerate(self.dir_path.iterdir(),1):
-			if isinstance(self.until, int) and instance_count == self.until:
-				break
-			instance: Tensor = self.transforms(read_image(path, mode=self.mode))
-			yield instance
-	def __len__(self):
-		max_length = len(list(self.dir_path.iterdir()))
-		if isinstance(self.until, int):
-			return min(self.until, max_length)
-		return max_length
-
-class CustomDataset(Dataset):
+	
+class CustomImageDataset(Dataset):
+	@classmethod
+	def from_path(cls, root: str, mode: ImageReadMode = ImageReadMode.RGB):
+		CustomImageDataset.root = Path(root)
+		paths = [
+			p for p in CustomImageDataset.root.rglob("*") if p.suffix.lower() in IMG_EXTS
+		]
+		return cls(paths, mode)
+	
 	@classmethod
 	def classes(cls):
 		if hasattr(cls, "CLASSES"):
 			return cls.CLASSES
-		root = cls.root
-		classes_txt_file = root / Path("classes.txt")
-		cls.CLASSES = None
-		if classes_txt_file.exists():
-			with open(classes_txt_file, "r") as classes_f:
-				cls.CLASSES = [line.rstrip("\n") for line in classes_f.readlines()]
-		else:
-			cls.CLASSES = [clss.name for clss in (root / Path("train")).iterdir()]
+		cls.CLASSES = [p.name for p in list(cls.root.iterdir())[0].iterdir()]
 		return cls.CLASSES
 	
-	def __init__(self, root:str, _type: str):
-		CustomDataset.root = root
-		self.type = _type
-		self.path = root / Path(_type)
-		self.items = list(self.path.iterdir())
-
-	def __len__(self):
-		return len(self.items)
-
-class CustomImageDataset(CustomDataset):
-	def __init__(self, root: str, _type: str, mode):
-		super().__init__(root, _type)
+	def __init__(self, paths: list[Path], mode: ImageReadMode = ImageReadMode.RGB):
 		self.mode = mode
+		self.paths = paths
+		self.targets = [self.classes().index(p.parts[-2]) for p in self.paths]
+		
+		self.indices_by_cls = defaultdict(list)
+		for i, p in enumerate(self.paths):
+			cls_name = p.parent.name
+			self.indices_by_cls[cls_name].append(i)
 
 	def path_instance_pair(self, index: int):
-		path: Path = self.items[index]
+		path: Path = self.paths[index]
 		instance = read_image(path, mode=self.mode) 
 		return path, instance
-
-class OCTMendeleyDataset(CustomImageDataset):
-	def __init__(
-			self, 
-			_type,
-			target_dir="OCTData", 
-			preprocessed_suffix = "preprocessed",
-		):
-		target_dir_preprocessed = f'{target_dir}_{preprocessed_suffix}'
-		super().__init__(target_dir_preprocessed, _type, ImageReadMode.RGB)
-
-	def lbl2cls1(self, path: Path):
-		return path.name.split("-")[0]
-
-	def lbl2cls2(self, path: Path):
-		return path.name.split("_")[0].upper()
-
+	
+	def __len__(self):
+		return len(self.paths)
+	
 	def __getitem__(self, index: int):
-		path, instance = self.path_instance_pair(index)
-		label_str = self.lbl2cls2(path)
-		label = self.classes().index(label_str)
+		_, instance = self.path_instance_pair(index)
+		label = self.targets[index]
 		return instance, label
 
+	def sample_from_class(self, cls_name: str, n: int):
+		return random.sample(self.indices_by_cls[cls_name], n)
+
+class OCTDataset(CustomImageDataset):
+	pass
+
+class IterableOCTDataset(Iterable):
+	def __init__(
+			self, 
+			dataset: OCTDataset,
+			until = None, 
+			transforms = v2.ToDtype(torch.float32),
+		):
+		self.dataset = dataset
+		self.until = until
+		self.transforms = transforms
+	def __iter__(self):
+		for instance_count, (instance, _) in enumerate(self.dataset,1):
+			if isinstance(self.until, int) and instance_count == self.until:
+				break
+			instance = self.transforms(instance)
+			yield instance
+	def __len__(self):
+		max_length = len(self.dataset)
+		if isinstance(self.until, int):
+			return min(self.until, max_length)
+		return max_length
+	
 @dataclass
 class TransferLearningHead:
 	label: str
@@ -160,6 +154,29 @@ class TransferLearning:
 		"densenet161": TransferLearningHead("classifier", 2208), 
 		"densenet169": TransferLearningHead("classifier", 1664),
 		"densenet201": TransferLearningHead("classifier", 1920),
+
+		"mobilenet_v2":TransferLearningHead(
+			"classifier", 
+			lambda c: nn.Sequential(nn.Dropout(p=0.2), nn.Linear(1280, c))
+		),
+		"mobilenet_v3_small":TransferLearningHead(
+			"classifier", 
+			lambda c: nn.Sequential(
+  			  nn.Linear(576, 1024),
+  			  nn.Hardswish(),
+  			  nn.Dropout(p=0.2, inplace=True),
+  			  nn.Linear(1024, c),
+  			)
+		),
+		"mobilenet_v3_large":TransferLearningHead(
+			"classifier", 
+			lambda c: nn.Sequential(
+  			  nn.Linear(960, 1280, bias=True),
+  			  nn.Hardswish(),
+  			  nn.Dropout(p=0.2, inplace=True),
+  			  nn.Linear(1280, c, bias=True),
+  			)
+		),
 	}
 
 	@staticmethod
@@ -186,7 +203,15 @@ class TransferLearning:
 	def replace_head(cls, model_name, num_classes):
 		tlhead = TransferLearning.get_tlhead(model_name)
 		model = cls.models[model_name].model
-		setattr(model, tlhead.label, nn.Linear(tlhead.input_size, num_classes))
+		new_head = None
+		if isinstance(tlhead.input_size, int):
+			new_head = nn.Linear(tlhead.input_size, num_classes)
+		elif isinstance(tlhead.input_size, Callable):
+			new_head = tlhead.input_size(num_classes)
+		else:
+			raise TypeError(f"tlhead has invalid type {type(tlhead.input_size)}")
+
+		setattr(model, tlhead.label, new_head)
 	
 	@classmethod
 	def set_grads(cls, model_name, fill = None, verbose = False):
@@ -196,8 +221,6 @@ class TransferLearning:
 			param.requires_grad = fill if isinstance(fill, bool) else name.startswith(tlhead.label)
 			if verbose:
 				print(name, param.grad, param.requires_grad)
-
-
 
 def plotimg(img: Tensor, label: str):
 	img = img.permute(1,2,0)
@@ -233,16 +256,16 @@ for combination in product_dict(valid_mapping, condition):
 		if condition(**comb):
 			yield comb
 
-def stringify_map(_map: Mapping, delim="_"):
-	return delim.join([f"{k}:{v}" for k, v in _map.items()])
-
 # LightningModule for Training
 class LitSupervised(L.LightningModule):
-	TRAIN_LOSS = "Train Loss"
-	VALIDATION_LOSS = "Validation Loss"
-	TRAIN_ACC = "Train Accuracy"
-	VALIDATION_ACC = "Validation Accuracy"
-
+	METRICS = (
+		"accuracy",
+		"precision",
+		"recall",
+		"f1_score",
+	)
+	SET_NAME_TRAIN = "train" 
+	SET_NAME_VAL = "val" 
 	TRANSFORMS = v2.Compose([
 		v2.ToDtype(torch.float32),
 		#v2.Normalize(mean=[49.4128, 49.4128, 49.4128], std=[57.3348, 57.3348, 57.3348]), #OCTDataMendeley 1000
@@ -250,11 +273,11 @@ class LitSupervised(L.LightningModule):
 		#v2.Normalize(mean=[54.0711, 54.0711, 54.0711], std=[45.5358, 45.5358, 45.5357]), #OCTData8C
 		#v2.Normalize(mean=[82.0378, 82.0378, 82.0378], std=[79.9393, 79.9393, 79.9393]), #obulisainaren mv to middle
 
-		#v2.Normalize(mean=[53.4781, 53.4781, 53.4781], std=[47.4589, 47.4589, 47.4589], #OCTData8C
 		#v2.Normalize(mean=[48.6115, 48.6115, 48.6115], std=[56.3848, 56.3848, 56.3848], #OCTDataMendeley
+		#v2.Normalize(mean=[53.4781, 53.4781, 53.4781], std=[47.4589, 47.4589, 47.4589], #OCTData8C
 		v2.ToDtype(torch.float32, scale=True),
 	])
-	def __init__(self, config):
+	def __init__(self, config, classes=None):
 		super().__init__()
 		runname = config["run"]
 		model_name = config["model"]
@@ -262,7 +285,7 @@ class LitSupervised(L.LightningModule):
 		tlmodel = TransferLearning.models[model_name]
 		self.model = tlmodel.model
 		# Replace head with a single layer MLP
-		TransferLearning.replace_head(model_name, len(OCTMendeleyDataset.classes()))
+		TransferLearning.replace_head(model_name, len(OCTDataset.classes()))
 		if runname == "step1":
 			print("Freezing weights")
 			# Step 1: Freeze weights
@@ -272,7 +295,7 @@ class LitSupervised(L.LightningModule):
 			# Step 2: Unfreeze weights
 			TransferLearning.set_grads(model_name, True)
 		self.config = config
-
+		self.classes = classes
 	def reset_parameters(self, verbose=False):
 		for name, layer in self.model.named_modules():
 			if verbose:
@@ -280,18 +303,42 @@ class LitSupervised(L.LightningModule):
 			if hasattr(layer, 'reset_parameters'):
 				layer.reset_parameters()
 
-	def get_metrics(self, batch, transforms, labels: Mapping[str, str]):
+	def get_metrics(self, batch, transforms, set_name: str, metric_labels: Iterable[str]):
 		instance, target = batch
 		instance = transforms(instance)
 		preds: Tensor = self.model(instance)
 
 		# Logging to TensorBoard (if installed) by default
 		values = {}
-		if "loss" in labels:
-			values[labels["loss"]] = F.cross_entropy(preds, target) 
-		if "accuracy" in labels:
-			values[labels["accuracy"]] = MF.accuracy(preds, target, task="multiclass", num_classes=preds.size(1))
-			
+		def log_agg(label, avg="micro"):
+			new_label = f"{set_name}_{label}_{avg}"
+			values[new_label] = getattr(MF, label)(
+				preds, 
+				target, 
+				task="multiclass",
+				average=avg, 
+				num_classes=preds.size(1)
+			)
+
+		def log_per_cls(label):
+			scores = getattr(MF, label)(
+				preds, 
+				target, 
+				task="multiclass",
+				average="none", 
+				num_classes=preds.size(1)
+			)
+			for cls, score in zip(self.classes, scores):
+				new_label = f"{set_name}_{label}_{cls}"
+				values[new_label] = score 
+
+		for label in metric_labels:
+			log_agg(label)
+			log_agg(label, "macro")
+			log_per_cls(label)
+
+		new_label = f"{set_name}_loss"
+		values[new_label] = F.cross_entropy(preds, target) 
 		self.log_dict(
 			values, 
 			prog_bar=True,
@@ -299,7 +346,29 @@ class LitSupervised(L.LightningModule):
 			on_epoch=True,
 			reduce_fx="mean",
 		)
-		return {k: values[v] for k,v in labels.items()}
+		values["loss"] = values[new_label]
+		return values
+
+	@staticmethod
+	def metric_names_avg(set_names, avgs):
+		return [
+			f"{set_name}_{metric}_{avg}" for set_name in set_names for metric in LitSupervised.METRICS for avg in avgs
+		]
+	
+	@staticmethod
+	def metric_names_classes(set_names, classes):
+		return [
+			f"{set_name}_{metric}_{cls}" for set_name in set_names for metric in LitSupervised.METRICS for cls in classes
+		]
+	
+	def metric_names(self):
+		return LitSupervised.metric_names_avg(
+			[LitSupervised.SET_NAME_TRAIN, LitSupervised.SET_NAME_VAL], 
+			["micro", "macro"],
+		) + LitSupervised.metric_names_classes(
+			[LitSupervised.SET_NAME_TRAIN, LitSupervised.SET_NAME_VAL], 
+			self.classes,
+		)
 
 	def training_step(self, batch, batch_idx):
 		TRAIN_TRANSFORMS = v2.Compose([
@@ -312,14 +381,16 @@ class LitSupervised(L.LightningModule):
 		return self.get_metrics(
 			batch, 
 			TRAIN_TRANSFORMS,
-			{"loss": LitSupervised.TRAIN_LOSS, "accuracy": LitSupervised.TRAIN_ACC},
+			LitSupervised.SET_NAME_TRAIN,
+			LitSupervised.METRICS,
 		)
 	
 	def validation_step(self, batch, batch_idx):
 		return self.get_metrics(
 			batch, 
 			LitSupervised.TRANSFORMS,
-			{"loss": LitSupervised.VALIDATION_LOSS, "accuracy": LitSupervised.VALIDATION_ACC},
+			LitSupervised.SET_NAME_VAL,
+			LitSupervised.METRICS,
 		)
 
 	def configure_optimizers(self):

@@ -1,12 +1,14 @@
-from typing import Iterable
+from typing import Iterable, Mapping, Optional
 import time
 from collections import defaultdict
 import shutil
 from pathlib import Path
 
+
 import numpy as np
 import cv2 as cv
 from tqdm import tqdm
+from sklearn.model_selection import train_test_split
 
 import torch
 from torch import Tensor
@@ -14,6 +16,17 @@ from torchvision.io import read_image, ImageReadMode
 from torchvision.transforms import v2
 import kagglehub
 
+# Use bfloat16
+torch.set_float32_matmul_precision('medium')
+
+IMG_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff'}
+
+class ClassPopulation(dict):
+	def __init__(self, mapping: Mapping[Path, int]):
+		super().__init__(mapping) 
+	def __repr__(self):
+		return str({k.name: v for k, v in self.items()})
+	
 def download_dataset(dataset_name: str):
 	print(f"Downloading dataset {dataset_name} from Kaggle...")
 	path = kagglehub.dataset_download(dataset_name)
@@ -151,3 +164,6 @@ def get_normal_statistics(
 	for instance in tqdm(iterable, desc="Calculating normal statistics..."):
 		combinedNormalStats.update(instance, dim=dim)
 	return combinedNormalStats.get()
+
+def stringify_map(_map: Mapping, delim="_"):
+	return delim.join([f"{k}:{v}" for k, v in _map.items()])
