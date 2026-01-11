@@ -9,6 +9,7 @@ import numpy as np
 from numpy import ndarray
 import cv2 as cv
 from PIL import Image
+import pandas as pd
 
 import torch
 from torch import nn, Tensor, optim
@@ -20,6 +21,7 @@ from torchvision.models import WeightsEnum
 
 import lightning as L
 import torchmetrics.functional as MF
+from torchmetrics.classification import MulticlassStatScores
 
 import sys
 from pathlib import Path
@@ -74,15 +76,38 @@ class CustomImageDataset(Dataset):
 		cls.CLASSES = [p.name for p in list(cls.root.iterdir())[0].iterdir()]
 		return cls.CLASSES
 	
-	def __init__(self, paths: list[Path], mode: ImageReadMode = ImageReadMode.RGB):
-		self.mode = mode
+	def class_dist(self):
+		return {k: len(v) for k, v in self.indices_by_cls.items()}
+	
+	def oversample(self):
+		class_dist = self.class_dist()
+		max_val = max(class_dist.values())
+		num_paths2add_per_class = {k: max_val-v for k, v in class_dist.items()}
+
+		for cls, num_paths2add in num_paths2add_per_class.items():
+			files2add = random.choices(self.indices_by_cls[cls], k=num_paths2add)
+			self.indices_by_cls[cls].extend(files2add)
+		paths_indices = sum(self.indices_by_cls.values(), [])
+		self.targets_from_paths([self.paths[k] for k in paths_indices])
+
+	def targets_from_paths(self, paths: list[Path]):
 		self.paths = paths
 		self.targets = [self.classes().index(p.parts[-2]) for p in self.paths]
-		
+
+	def indices_by_cls_from_paths(self):
 		self.indices_by_cls = defaultdict(list)
 		for i, p in enumerate(self.paths):
 			cls_name = p.parent.name
 			self.indices_by_cls[cls_name].append(i)
+
+	def setup_paths(self, paths: list[Path]):
+		self.paths = paths
+		self.targets = [self.classes().index(p.parts[-2]) for p in self.paths]
+		
+	def __init__(self, paths: list[Path], mode: ImageReadMode = ImageReadMode.RGB):
+		self.mode = mode
+		self.targets_from_paths(paths)
+		self.indices_by_cls_from_paths()
 
 	def path_instance_pair(self, index: int):
 		path: Path = self.paths[index]
@@ -93,9 +118,9 @@ class CustomImageDataset(Dataset):
 		return len(self.paths)
 	
 	def __getitem__(self, index: int):
-		_, instance = self.path_instance_pair(index)
+		path, instance = self.path_instance_pair(index)
 		label = self.targets[index]
-		return instance, label
+		return path, instance, label
 
 	def sample_from_class(self, cls_name: str, n: int):
 		return random.sample(self.indices_by_cls[cls_name], n)
@@ -124,6 +149,14 @@ class IterableOCTDataset(Iterable):
 		if isinstance(self.until, int):
 			return min(self.until, max_length)
 		return max_length
+
+class OCTCollate:
+	def __call__(self, batch):
+		paths, instances, labels = zip(*batch)
+		paths = np.array(paths)
+		instances = torch.stack(instances)
+		labels = torch.tensor(labels)
+		return paths, instances, labels
 	
 @dataclass
 class TransferLearningHead:
@@ -304,29 +337,29 @@ class LitSupervised(L.LightningModule):
 				layer.reset_parameters()
 
 	def get_metrics(self, batch, transforms, set_name: str, metric_labels: Iterable[str]):
-		instance, target = batch
+		_, instance, target = batch
 		instance = transforms(instance)
-		preds: Tensor = self.model(instance)
+		logits: Tensor = self.model(instance)
 
 		# Logging to TensorBoard (if installed) by default
 		values = {}
 		def log_agg(label, avg="micro"):
 			new_label = f"{set_name}_{label}_{avg}"
 			values[new_label] = getattr(MF, label)(
-				preds, 
+				logits, 
 				target, 
 				task="multiclass",
 				average=avg, 
-				num_classes=preds.size(1)
+				num_classes=logits.size(1)
 			)
 
 		def log_per_cls(label):
 			scores = getattr(MF, label)(
-				preds, 
+				logits, 
 				target, 
 				task="multiclass",
 				average="none", 
-				num_classes=preds.size(1)
+				num_classes=logits.size(1)
 			)
 			for cls, score in zip(self.classes, scores):
 				new_label = f"{set_name}_{label}_{cls}"
@@ -338,7 +371,7 @@ class LitSupervised(L.LightningModule):
 			log_per_cls(label)
 
 		new_label = f"{set_name}_loss"
-		values[new_label] = F.cross_entropy(preds, target) 
+		values[new_label] = F.cross_entropy(logits, target) 
 		self.log_dict(
 			values, 
 			prog_bar=True,
@@ -392,6 +425,50 @@ class LitSupervised(L.LightningModule):
 			LitSupervised.SET_NAME_VAL,
 			LitSupervised.METRICS,
 		)
+
+	def predict_step(self, batch, batch_idx):
+		paths, instance, target = batch
+		instance = LitSupervised.TRANSFORMS(instance)
+		logits: Tensor = self.model(instance)		
+		preds = torch.argmax(logits, dim=1)
+		
+		preds_oh = F.one_hot(
+			preds.long(), logits.size(1)
+		)
+		target_oh = F.one_hot(
+			target.long(), logits.size(1)
+		)
+		
+		stats = {
+			"tp": ((preds_oh == 1) & (target_oh == 1)),
+			"fn": ((preds_oh == 0) & (target_oh == 1)),
+			"fp": ((preds_oh == 1) & (target_oh == 0)),
+			"tn": ((preds_oh == 0) & (target_oh == 0)),
+		}
+		
+		def df_from_stat(stat_name:str, stat: Tensor):
+			indices = np.where(stat[:, i].cpu().numpy().astype(bool))[0]
+			return (
+				pd.DataFrame({"path": paths[indices]}) 
+				if stat_name.lower() == "tp" 
+				else pd.DataFrame({
+					"path": paths[indices],
+					"prediction": np.array([self.classes[p] for p in preds[indices]]),
+				})
+			)
+
+		for i, class_name in enumerate(self.classes):
+			for stat_name, stat in stats.items():
+				_pd = df_from_stat(stat_name, stat)
+				csvpath = Path(self.trainer.log_dir).parent / f"predict_{class_name}_{stat_name}.csv"
+				_pd.to_csv(
+					csvpath, 
+					mode="a",
+					index=False,
+					header=not csvpath.exists(),
+				)
+
+		return {"preds": preds, "targets": target}
 
 	def configure_optimizers(self):
 		optimizer = optim.Adam(self.parameters(), lr=self.config["lr"])
